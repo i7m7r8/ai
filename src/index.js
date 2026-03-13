@@ -116,7 +116,7 @@ function extractContent(aiResponse) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const MODEL_ID   = "@cf/meta/llama-4-scout-17b-16e-instruct-fp8";
+    const MODEL_ID   = "@cf/meta/llama-4-scout-17b-16e-instruct";
     const MODEL_NAME = "llama-4-scout";
 
     const jsonHeaders = {
