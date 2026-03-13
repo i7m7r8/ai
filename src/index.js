@@ -1,6 +1,9 @@
 export default {
   async fetch(request, env) {
 
+    const url = new URL(request.url);
+
+    // CORS
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -11,6 +14,25 @@ export default {
       });
     }
 
+    // Models endpoint
+    if (url.pathname === "/v1/models" || url.pathname === "/models") {
+      return new Response(JSON.stringify({
+        object: "list",
+        data: [{
+          id: "qwen2.5-coder-32b",
+          object: "model",
+          created: 1700000000,
+          owned_by: "cloudflare"
+        }]
+      }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+
+    // Chat endpoint
     try {
       const body = await request.json();
       const messages = body.messages || [
