@@ -3,7 +3,6 @@ export default {
 
     const url = new URL(request.url);
 
-    // CORS
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -14,7 +13,6 @@ export default {
       });
     }
 
-    // Models endpoint
     if (url.pathname === "/v1/models" || url.pathname === "/models") {
       return new Response(JSON.stringify({
         object: "list",
@@ -32,7 +30,6 @@ export default {
       });
     }
 
-    // Chat endpoint - handles ALL paths including /v1/chat/completions
     try {
       const body = await request.json();
       const messages = body.messages || [
@@ -43,29 +40,36 @@ export default {
         "@cf/qwen/qwen2.5-coder-32b-instruct",
         {
           messages,
-          max_tokens: 8912,
+          max_tokens: 8192,
           stream: false
         }
       );
 
+      // Fixed response format — Maid needs exact OpenAI spec
       return new Response(JSON.stringify({
-        id: "chatcmpl-cf",
+        id: "chatcmpl-" + Date.now(),
         object: "chat.completion",
-        created: Date.now(),
+        created: Math.floor(Date.now() / 1000),
         model: "qwen2.5-coder-32b",
         choices: [{
           index: 0,
           message: {
             role: "assistant",
-            content: response.response
+            content: response.response ?? ""
           },
-          finish_reason: "stop"
+          delta: {
+            role: "assistant",
+            content: response.response ?? ""
+          },
+          finish_reason: "stop",
+          logprobs: null
         }],
         usage: {
           prompt_tokens: 0,
           completion_tokens: 0,
           total_tokens: 0
-        }
+        },
+        system_fingerprint: null
       }), {
         headers: {
           "Content-Type": "application/json",
@@ -75,7 +79,11 @@ export default {
 
     } catch (err) {
       return new Response(JSON.stringify({
-        error: err.message
+        id: "error",
+        error: {
+          message: err.message,
+          type: "server_error"
+        }
       }), {
         status: 500,
         headers: {
