@@ -1,7 +1,6 @@
 export default {
   async fetch(request, env) {
 
-    // Handle CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -19,7 +18,7 @@ export default {
       ];
 
       const response = await env.AI.run(
-        "@cf/qwen/qwen2.5-coder-7b-instruct",
+        "@cf/qwen/qwen2.5-coder-32b-instruct",
         {
           messages,
           max_tokens: 2048,
@@ -27,7 +26,6 @@ export default {
         }
       );
 
-      // Return OpenAI-compatible format so any app works
       return new Response(JSON.stringify({
         id: "chatcmpl-cf",
         object: "chat.completion",
@@ -39,7 +37,7 @@ export default {
           finish_reason: "stop",
           index: 0
         }],
-        model: "qwen2.5-coder-7b"
+        model: "qwen2.5-coder-32b"
       }), {
         headers: {
           "Content-Type": "application/json",
