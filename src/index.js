@@ -2,18 +2,23 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // CORS
+    // CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, GET",
+          "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization",
         }
       });
     }
 
-    // Ollama tags endpoint — Maid uses this to list models
+    const corsHeaders = {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    };
+
+    // ── Ollama: list models ──────────────────────────────────────────────────
     if (url.pathname === "/api/tags") {
       return new Response(JSON.stringify({
         models: [{
@@ -29,15 +34,10 @@ export default {
             quantization_level: "Q4_K_M"
           }
         }]
-      }), {
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
+      }), { headers: corsHeaders });
     }
 
-    // OpenAI models endpoint
+    // ── OpenAI: list models ──────────────────────────────────────────────────
     if (url.pathname === "/v1/models" || url.pathname === "/models") {
       return new Response(JSON.stringify({
         object: "list",
@@ -47,69 +47,86 @@ export default {
           created: 1700000000,
           owned_by: "cloudflare"
         }]
-      }), {
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
+      }), { headers: corsHeaders });
     }
 
+    // ── Parse body safely (handles empty / malformed body) ───────────────────
+    let body = {};
     try {
-      const body = await request.json();
-      const messages = body.messages || [
-        { role: "user", content: body.prompt || "Hello" }
-      ];
+      const text = await request.text();
+      if (text && text.trim().length > 0) {
+        body = JSON.parse(text);
+      }
+    } catch (e) {
+      body = {};
+    }
 
-      const response = await env.AI.run(
+    const messages = body.messages || [
+      { role: "user", content: body.prompt || "Hello" }
+    ];
+
+    // ── Call Cloudflare Workers AI ───────────────────────────────────────────
+    let content = "";
+    try {
+      const aiResponse = await env.AI.run(
         "@cf/qwen/qwen2.5-coder-32b-instruct",
-        { messages, max_tokens: 8192, stream: false }
+        { messages, max_tokens: 8192 }   // ✅ no stream:false
       );
 
-      const content = response.response ?? "";
+      // Safely extract content from whatever shape the response has
+      content =
+        aiResponse?.response ??
+        aiResponse?.result?.response ??
+        aiResponse?.choices?.[0]?.message?.content ??
+        "";
 
-      // Ollama /api/chat response — exact format Maid expects
-      if (url.pathname === "/api/chat") {
-        return new Response(JSON.stringify({
-          model: "qwen2.5-coder-32b",
-          created_at: new Date().toISOString(),
-          message: {
-            role: "assistant",
-            content: content
-          },
-          done_reason: "stop",
-          done: true,
-          total_duration: 1000000000,
-          load_duration: 0,
-          prompt_eval_count: 0,
-          prompt_eval_duration: 0,
-          eval_count: 0,
-          eval_duration: 0
-        }), {
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*"
-          }
-        });
+      if (!content) {
+        console.error("Empty AI response. Full object:", JSON.stringify(aiResponse));
       }
 
-      // Ollama /api/generate response
-      if (url.pathname === "/api/generate") {
-        return new Response(JSON.stringify({
-          model: "qwen2.5-coder-32b",
-          created_at: new Date().toISOString(),
-          response: content,
-          done: true,
-          done_reason: "stop"
-        }), {
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*"
-          }
-        });
-      }
+    } catch (err) {
+      console.error("AI run error:", err.message);
+      return new Response(JSON.stringify({
+        error: { message: err.message, type: "ai_error" }
+      }), { status: 500, headers: corsHeaders });
+    }
 
-      // OpenAI fallback
+    // ── Ollama: /api/chat ────────────────────────────────────────────────────
+    if (url.pathname === "/api/chat") {
+      return new Response(JSON.stringify({
+        model: "qwen2.5-coder-32b",
+        created_at: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: content
+        },
+        done_reason: "stop",
+        done: true,
+        total_duration: 1000000000,
+        load_duration: 0,
+        prompt_eval_count: 0,
+        prompt_eval_duration: 0,
+        eval_count: 0,
+        eval_duration: 0
+      }), { headers: corsHeaders });
+    }
+
+    // ── Ollama: /api/generate ────────────────────────────────────────────────
+    if (url.pathname === "/api/generate") {
+      return new Response(JSON.stringify({
+        model: "qwen2.5-coder-32b",
+        created_at: new Date().toISOString(),
+        response: content,
+        done: true,
+        done_reason: "stop"
+      }), { headers: corsHeaders });
+    }
+
+    // ── OpenAI: /v1/chat/completions  (Chatbox AI uses this) ─────────────────
+    if (
+      url.pathname === "/v1/chat/completions" ||
+      url.pathname === "/chat/completions"
+    ) {
       return new Response(JSON.stringify({
         id: "chatcmpl-" + Date.now(),
         object: "chat.completion",
@@ -117,27 +134,25 @@ export default {
         model: "qwen2.5-coder-32b",
         choices: [{
           index: 0,
-          message: { role: "assistant", content },
+          message: { role: "assistant", content: content },
           finish_reason: "stop"
         }],
         usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      }), {
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
-
-    } catch (err) {
-      return new Response(JSON.stringify({
-        error: { message: err.message, type: "server_error" }
-      }), {
-        status: 500,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
+      }), { headers: corsHeaders });
     }
+
+    // ── Fallback: root "/" or anything else → OpenAI format ──────────────────
+    return new Response(JSON.stringify({
+      id: "chatcmpl-" + Date.now(),
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: "qwen2.5-coder-32b",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: content },
+        finish_reason: "stop"
+      }],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+    }), { headers: corsHeaders });
   }
 };
