@@ -49,15 +49,15 @@ async function webSearch(query, exaApiKey) {
       body: JSON.stringify({
         query, type: "auto", numResults: 5,
         contents: { text: true, highlights: { numSentences: 3 } }
-      })
-    });
+  )
+);
     if (!res.ok) return null;
     const data = await res.json();
     if (!data.results || data.results.length === 0) return null;
     return data.results.map((r, i) =>
       `[${i+1}] ${r.title}\nURL: ${r.url}\n${
         r.highlights ? r.highlights.join(" ") : (r.text || "").slice(0, 300)
-      }`
+  `
     ).join("\n\n");
   } catch (e) { return null; }
 }
@@ -70,8 +70,8 @@ function normalizeMessages(rawMessages) {
         if (typeof part === "string") return part;
         if (part && part.type === "text") return part.text || "";
         return "";
-      }).join("\n").trim();
-    }
+  ).join("\n").trim();
+
     return { role: msg.role, content: c || "" };
   });
 }
@@ -79,19 +79,19 @@ function normalizeMessages(rawMessages) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const MODEL_ID   = "@cf/openai/gpt-oss-120b";
-    const MODEL_NAME = "gpt-oss-120b";
+    const MODEL_ID   = "@cf/meta/llama-4-scout-17b-16e-instruct-fp8";
+    const MODEL_NAME = "llama-4-scout";
 
     const jsonHeaders = {
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*"
-    };
+;
     const sseHeaders = {
       "Content-Type": "text/event-stream",
       "Access-Control-Allow-Origin": "*",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive"
-    };
+;
 
     // CORS preflight
     if (request.method === "OPTIONS") {
@@ -100,9 +100,9 @@ export default {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-      });
-    }
+    
+  );
+
 
     // ── Debug ────────────────────────────────────────────────────────────────
     if (url.pathname === "/debug") {
@@ -110,35 +110,35 @@ export default {
         exa_key_set: !!(env.EXA_API_KEY),
         exa_key_length: env.EXA_API_KEY ? env.EXA_API_KEY.length : 0,
         ai_binding: !!(env.AI)
-      }), { headers: jsonHeaders });
-    }
+  ), { headers: jsonHeaders });
+
 
     // ── Ollama: list models ──────────────────────────────────────────────────
     if (url.pathname === "/api/tags") {
       return new Response(JSON.stringify({
         models: [{
           name: MODEL_NAME, model: MODEL_NAME,
-          modified_at: "2025-08-05T00:00:00Z",
-          size: 120000000000, digest: "gptoss120b",
-          details: { format: "gguf", family: "openai", parameter_size: "120B", quantization_level: "FP8" }
-        }]
-      }), { headers: jsonHeaders });
-    }
+          modified_at: "2025-04-05T00:00:00Z",
+          size: 17000000000, digest: "llama4scout",
+          details: { format: "gguf", family: "meta", parameter_size: "17Bx16E", quantization_level: "FP8" }
+    ]
+  ), { headers: jsonHeaders });
+
 
     // ── OpenAI: list models ──────────────────────────────────────────────────
     if (url.pathname === "/v1/models" || url.pathname === "/models") {
       return new Response(JSON.stringify({
         object: "list",
         data: [{ id: MODEL_NAME, object: "model", created: 1754352000, owned_by: "openai" }]
-      }), { headers: jsonHeaders });
-    }
+  ), { headers: jsonHeaders });
+
 
     // ── Parse body ───────────────────────────────────────────────────────────
     let body = {};
     try {
       const text = await request.text();
       if (text && text.trim().length > 0) body = JSON.parse(text);
-    } catch (e) { body = {}; }
+ catch (e) { body = {}; }
 
     const wantsStream = body.stream === true;
 
@@ -146,7 +146,16 @@ export default {
     const rawMessages = body.messages || [
       { role: "user", content: body.prompt || "Hello" }
     ];
-    const messages = normalizeMessages(rawMessages).slice(-20);
+
+
+    let normalized = normalizeMessages(rawMessages);  // 10M context — no trim needed
+
+
+
+
+
+
+    const messages = normalized;
     const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
     const userText = lastUserMsg ? lastUserMsg.content : "";
 
@@ -160,7 +169,7 @@ export default {
     if (calcMatch && /[+\-*/]/.test(calcMatch[1])) {
       const result = calculate(calcMatch[1].trim());
       if (result) toolContext += result + "\n";
-    }
+
 
     // ── Web search ───────────────────────────────────────────────────────────
     const exaKey = (env.EXA_API_KEY || "967d01bd-2a63-4b9c-a17e-4351d09fadb2").trim();
@@ -171,8 +180,8 @@ export default {
           .trim().slice(0, 200);
         const searchResults = await webSearch(searchQuery, exaKey);
         if (searchResults) toolContext += "\n\nWeb search results:\n" + searchResults + "\n";
-      } catch (e) {}
-    }
+   catch (e) {}
+
 
     // ── Build final messages ─────────────────────────────────────────────────
     const systemMsg = {
@@ -181,7 +190,7 @@ export default {
         "You are a helpful AI assistant. Use this real-time context:\n\n" +
         toolContext +
         "\nCite sources when using search results. Be accurate and concise."
-    };
+;
     const hasSystem = messages[0] && messages[0].role === "system";
     const finalMessages = hasSystem
       ? [systemMsg, ...messages.slice(1)]
@@ -197,10 +206,10 @@ export default {
         // Native streaming — AI sends tokens as they generate
         const aiStream = await env.AI.run(MODEL_ID, {
           messages: finalMessages,
-          max_tokens: 32768,           // max allowed
-          reasoning: { effort: reasoningLevel },
+          max_tokens: 16384,           // max allowed
+
           stream: true                 // ← native CF streaming
-        });
+    );
 
         const stream = new ReadableStream({
           async start(controller) {
@@ -223,11 +232,11 @@ export default {
                       id, object: "chat.completion.chunk", created,
                       model: MODEL_NAME,
                       choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
-                    };
+                ;
                     controller.enqueue(encoder.encode("data: " + JSON.stringify(doneChunk) + "\n\n"));
                     controller.enqueue(encoder.encode("data: [DONE]\n\n"));
                     break;
-                  }
+              
                   try {
                     const parsed = JSON.parse(data);
                     // Extract token from CF AI stream format
@@ -244,36 +253,36 @@ export default {
                           index: 0,
                           delta: { content: token },
                           finish_reason: null
-                        }]
-                      };
+                    ]
+                  ;
                       controller.enqueue(encoder.encode("data: " + JSON.stringify(chunk) + "\n\n"));
-                    }
-                  } catch (e) {}
-                }
-              }
-            }
+                
+               catch (e) {}
+            
+          
+        
             controller.close();
-          }
-        });
+      
+    );
 
         return new Response(stream, { headers: sseHeaders });
 
-      } catch (err) {
+   catch (err) {
         // Stream failed — fallback to normal response
         return new Response(JSON.stringify({
           error: { message: err.message, type: "ai_error" }
-        }), { status: 500, headers: jsonHeaders });
-      }
-    }
+    ), { status: 500, headers: jsonHeaders });
+  
+
 
     // ── NON-STREAMING response ───────────────────────────────────────────────
     let content = "";
     try {
       const aiResponse = await env.AI.run(MODEL_ID, {
         messages: finalMessages,
-        max_tokens: 32768,
-        reasoning: { effort: reasoningLevel }
-      });
+        max_tokens: 16384,
+
+  );
 
       // Extract content from all possible response shapes
       if (Array.isArray(aiResponse?.output)) {
@@ -283,24 +292,24 @@ export default {
             for (const part of block.content) {
               if ((part.type === "output_text" || part.type === "text") && part.text)
                 texts.push(part.text);
-            }
-          }
+        
+      
           if (typeof block.content === "string") texts.push(block.content);
-        }
+    
         if (texts.length > 0) content = texts.join("\n");
-      }
+  
       if (!content) {
         content =
           aiResponse?.response ||
           (aiResponse?.result && aiResponse.result.response) ||
           (aiResponse?.choices?.[0]?.message?.content) ||
           "";
-      }
-    } catch (err) {
+  
+ catch (err) {
       return new Response(JSON.stringify({
         error: { message: err.message, type: "ai_error" }
-      }), { status: 500, headers: jsonHeaders });
-    }
+  ), { status: 500, headers: jsonHeaders });
+
 
     // ── Ollama: /api/chat ────────────────────────────────────────────────────
     if (url.pathname === "/api/chat") {
@@ -311,16 +320,16 @@ export default {
         total_duration: 1000000000, load_duration: 0,
         prompt_eval_count: 0, prompt_eval_duration: 0,
         eval_count: 0, eval_duration: 0
-      }), { headers: jsonHeaders });
-    }
+  ), { headers: jsonHeaders });
+
 
     // ── Ollama: /api/generate ────────────────────────────────────────────────
     if (url.pathname === "/api/generate") {
       return new Response(JSON.stringify({
         model: MODEL_NAME, created_at: new Date().toISOString(),
         response: content, done: true, done_reason: "stop"
-      }), { headers: jsonHeaders });
-    }
+  ), { headers: jsonHeaders });
+
 
     // ── OpenAI: /v1/chat/completions + fallback ──────────────────────────────
     return new Response(JSON.stringify({
@@ -332,8 +341,8 @@ export default {
         index: 0,
         message: { role: "assistant", content },
         finish_reason: "stop"
-      }],
+  ],
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-    }), { headers: jsonHeaders });
+), { headers: jsonHeaders });
   }
 };
