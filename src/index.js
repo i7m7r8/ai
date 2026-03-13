@@ -266,6 +266,7 @@ export default {
                   try {
                     const parsed = JSON.parse(data);
                     parsed.model = MODEL_NAME;
+                    if (parsed.choices) { parsed.choices.forEach(function(c) { if (c.delta && c.delta.content !== undefined) c.delta.content = String(c.delta.content); }); }
                     controller.enqueue(encoder.encode("data: " + JSON.stringify(parsed) + "\n\n"));
                   } catch (e) {}
                 }
@@ -302,7 +303,7 @@ export default {
                     const parsed = JSON.parse(data);
                     const token = parsed.response || (parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content) || "";
                     if (token) {
-                      const chunk = { id: id, object: "chat.completion.chunk", created: created, model: MODEL_NAME, choices: [{ index: 0, delta: { content: token }, finish_reason: null }] };
+                      const chunk = { id: id, object: "chat.completion.chunk", created: created, model: MODEL_NAME, choices: [{ index: 0, delta: { content: String(token) }, finish_reason: null }] };
                       controller.enqueue(encoder.encode("data: " + JSON.stringify(chunk) + "\n\n"));
                     }
                   } catch (e) {}
