@@ -1,20 +1,11 @@
 /**
  * Cloudflare Worker — GPT-OSS-120B
- *  ✅ Streaming (real-time word by word)
+ *  ✅ Native AI Streaming (no timeouts on long responses)
  *  ✅ Web Search (Exa API)
- *  ✅ Auto reasoning level
+ *  ✅ Auto reasoning level (low/medium/high)
  *  ✅ Built-in tools (calculator, date/time)
  *  ✅ OpenAI + Ollama compatible
  */
-
-function getCorsHeaders(stream) {
-  return {
-    "Content-Type": stream ? "text/event-stream" : "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive"
-  };
-}
 
 function needsSearch(text) {
   const t = text.toLowerCase();
@@ -85,73 +76,22 @@ function normalizeMessages(rawMessages) {
   });
 }
 
-function extractContent(aiResponse) {
-  if (!aiResponse) return "";
-  if (Array.isArray(aiResponse.output)) {
-    const texts = [];
-    for (const block of aiResponse.output) {
-      if (block.type === "message" && Array.isArray(block.content)) {
-        for (const part of block.content) {
-          if ((part.type === "output_text" || part.type === "text") && part.text)
-            texts.push(part.text);
-        }
-      }
-      if (typeof block.content === "string") texts.push(block.content);
-    }
-    if (texts.length > 0) return texts.join("\n");
-  }
-  return (
-    aiResponse.response ||
-    (aiResponse.result && aiResponse.result.response) ||
-    (aiResponse.choices && aiResponse.choices[0] &&
-     aiResponse.choices[0].message && aiResponse.choices[0].message.content) ||
-    ""
-  );
-}
-
-// Build SSE streaming response word by word
-function buildStreamResponse(content, model) {
-  const encoder = new TextEncoder();
-  const words = content.split(/(\s+)/);
-  const id = "chatcmpl-" + Date.now();
-  const created = Math.floor(Date.now() / 1000);
-
-  const stream = new ReadableStream({
-    async start(controller) {
-      // Send each word as a chunk
-      for (const word of words) {
-        const chunk = {
-          id, object: "chat.completion.chunk", created, model,
-          choices: [{
-            index: 0,
-            delta: { content: word },
-            finish_reason: null
-          }]
-        };
-        controller.enqueue(encoder.encode("data: " + JSON.stringify(chunk) + "\n\n"));
-        // Small delay to simulate streaming
-        await new Promise(r => setTimeout(r, 10));
-      }
-
-      // Send final done chunk
-      const doneChunk = {
-        id, object: "chat.completion.chunk", created, model,
-        choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
-      };
-      controller.enqueue(encoder.encode("data: " + JSON.stringify(doneChunk) + "\n\n"));
-      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      controller.close();
-    }
-  });
-
-  return stream;
-}
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const MODEL_ID   = "@cf/openai/gpt-oss-120b";
     const MODEL_NAME = "gpt-oss-120b";
+
+    const jsonHeaders = {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    };
+    const sseHeaders = {
+      "Content-Type": "text/event-stream",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive"
+    };
 
     // CORS preflight
     if (request.method === "OPTIONS") {
@@ -164,9 +104,7 @@ export default {
       });
     }
 
-    const jsonHeaders = getCorsHeaders(false);
-
-    // ── Debug endpoint ───────────────────────────────────────────────────────
+    // ── Debug ────────────────────────────────────────────────────────────────
     if (url.pathname === "/debug") {
       return new Response(JSON.stringify({
         exa_key_set: !!(env.EXA_API_KEY),
@@ -249,15 +187,115 @@ export default {
       ? [systemMsg, ...messages.slice(1)]
       : [systemMsg, ...messages];
 
-    // ── Call AI ──────────────────────────────────────────────────────────────
+    // ── STREAMING response (native CF AI stream — no timeout!) ───────────────
+    if (wantsStream) {
+      const id = "chatcmpl-" + Date.now();
+      const created = Math.floor(Date.now() / 1000);
+      const encoder = new TextEncoder();
+
+      try {
+        // Native streaming — AI sends tokens as they generate
+        const aiStream = await env.AI.run(MODEL_ID, {
+          messages: finalMessages,
+          max_tokens: 32768,           // max allowed
+          reasoning: { effort: reasoningLevel },
+          stream: true                 // ← native CF streaming
+        });
+
+        const stream = new ReadableStream({
+          async start(controller) {
+            const reader = aiStream.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              const text = decoder.decode(value);
+              const lines = text.split("\n").filter(l => l.trim());
+
+              for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                  const data = line.slice(6).trim();
+                  if (data === "[DONE]") {
+                    // Send final done chunk
+                    const doneChunk = {
+                      id, object: "chat.completion.chunk", created,
+                      model: MODEL_NAME,
+                      choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+                    };
+                    controller.enqueue(encoder.encode("data: " + JSON.stringify(doneChunk) + "\n\n"));
+                    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                    break;
+                  }
+                  try {
+                    const parsed = JSON.parse(data);
+                    // Extract token from CF AI stream format
+                    const token =
+                      parsed?.response ||
+                      parsed?.choices?.[0]?.delta?.content ||
+                      parsed?.choices?.[0]?.text ||
+                      "";
+                    if (token) {
+                      const chunk = {
+                        id, object: "chat.completion.chunk", created,
+                        model: MODEL_NAME,
+                        choices: [{
+                          index: 0,
+                          delta: { content: token },
+                          finish_reason: null
+                        }]
+                      };
+                      controller.enqueue(encoder.encode("data: " + JSON.stringify(chunk) + "\n\n"));
+                    }
+                  } catch (e) {}
+                }
+              }
+            }
+            controller.close();
+          }
+        });
+
+        return new Response(stream, { headers: sseHeaders });
+
+      } catch (err) {
+        // Stream failed — fallback to normal response
+        return new Response(JSON.stringify({
+          error: { message: err.message, type: "ai_error" }
+        }), { status: 500, headers: jsonHeaders });
+      }
+    }
+
+    // ── NON-STREAMING response ───────────────────────────────────────────────
     let content = "";
     try {
       const aiResponse = await env.AI.run(MODEL_ID, {
         messages: finalMessages,
-        max_tokens: 8192,
+        max_tokens: 32768,
         reasoning: { effort: reasoningLevel }
       });
-      content = extractContent(aiResponse);
+
+      // Extract content from all possible response shapes
+      if (Array.isArray(aiResponse?.output)) {
+        const texts = [];
+        for (const block of aiResponse.output) {
+          if (block.type === "message" && Array.isArray(block.content)) {
+            for (const part of block.content) {
+              if ((part.type === "output_text" || part.type === "text") && part.text)
+                texts.push(part.text);
+            }
+          }
+          if (typeof block.content === "string") texts.push(block.content);
+        }
+        if (texts.length > 0) content = texts.join("\n");
+      }
+      if (!content) {
+        content =
+          aiResponse?.response ||
+          (aiResponse?.result && aiResponse.result.response) ||
+          (aiResponse?.choices?.[0]?.message?.content) ||
+          "";
+      }
     } catch (err) {
       return new Response(JSON.stringify({
         error: { message: err.message, type: "ai_error" }
@@ -284,35 +322,7 @@ export default {
       }), { headers: jsonHeaders });
     }
 
-    // ── OpenAI: /v1/chat/completions ─────────────────────────────────────────
-    if (
-      url.pathname === "/v1/chat/completions" ||
-      url.pathname === "/chat/completions" ||
-      url.pathname === "/"  ||
-      url.pathname === ""
-    ) {
-      // Streaming response
-      if (wantsStream) {
-        const stream = buildStreamResponse(content, MODEL_NAME);
-        return new Response(stream, { headers: getCorsHeaders(true) });
-      }
-
-      // Normal response
-      return new Response(JSON.stringify({
-        id: "chatcmpl-" + Date.now(),
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: MODEL_NAME,
-        choices: [{
-          index: 0,
-          message: { role: "assistant", content },
-          finish_reason: "stop"
-        }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      }), { headers: jsonHeaders });
-    }
-
-    // ── Fallback ─────────────────────────────────────────────────────────────
+    // ── OpenAI: /v1/chat/completions + fallback ──────────────────────────────
     return new Response(JSON.stringify({
       id: "chatcmpl-" + Date.now(),
       object: "chat.completion",
