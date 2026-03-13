@@ -32,7 +32,7 @@ export default {
       });
     }
 
-    // Chat endpoint
+    // Chat endpoint - handles ALL paths including /v1/chat/completions
     try {
       const body = await request.json();
       const messages = body.messages || [
@@ -43,7 +43,7 @@ export default {
         "@cf/qwen/qwen2.5-coder-32b-instruct",
         {
           messages,
-          max_tokens: 2048,
+          max_tokens: 8912,
           stream: false
         }
       );
@@ -51,15 +51,21 @@ export default {
       return new Response(JSON.stringify({
         id: "chatcmpl-cf",
         object: "chat.completion",
+        created: Date.now(),
+        model: "qwen2.5-coder-32b",
         choices: [{
+          index: 0,
           message: {
             role: "assistant",
             content: response.response
           },
-          finish_reason: "stop",
-          index: 0
+          finish_reason: "stop"
         }],
-        model: "qwen2.5-coder-32b"
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0
+        }
       }), {
         headers: {
           "Content-Type": "application/json",
