@@ -18,20 +18,23 @@ export default {
       "Access-Control-Allow-Origin": "*"
     };
 
+    const MODEL_ID   = "@cf/openai/gpt-oss-120b";
+    const MODEL_NAME = "gpt-oss-120b";
+
     // ── Ollama: list models ──────────────────────────────────────────────────
     if (url.pathname === "/api/tags") {
       return new Response(JSON.stringify({
         models: [{
-          name: "qwen2.5-coder-32b",
-          model: "qwen2.5-coder-32b",
-          modified_at: "2025-01-01T00:00:00Z",
-          size: 19000000000,
-          digest: "abc123",
+          name: MODEL_NAME,
+          model: MODEL_NAME,
+          modified_at: "2025-08-05T00:00:00Z",
+          size: 120000000000,
+          digest: "gptoss120b",
           details: {
             format: "gguf",
-            family: "qwen",
-            parameter_size: "32B",
-            quantization_level: "Q4_K_M"
+            family: "openai",
+            parameter_size: "120B",
+            quantization_level: "FP8"
           }
         }]
       }), { headers: corsHeaders });
@@ -42,15 +45,15 @@ export default {
       return new Response(JSON.stringify({
         object: "list",
         data: [{
-          id: "qwen2.5-coder-32b",
+          id: MODEL_NAME,
           object: "model",
-          created: 1700000000,
-          owned_by: "cloudflare"
+          created: 1754352000,
+          owned_by: "openai"
         }]
       }), { headers: corsHeaders });
     }
 
-    // ── Parse body safely (handles empty / malformed body) ───────────────────
+    // ── Parse body safely ────────────────────────────────────────────────────
     let body = {};
     try {
       const text = await request.text();
@@ -61,49 +64,69 @@ export default {
       body = {};
     }
 
-    // Normalize messages — Cloudflare AI requires content as a plain string.
-    // Chatbox AI sends content as an array of {type, text} objects (OpenAI vision format).
+    // ── Normalize messages ───────────────────────────────────────────────────
+    // Flatten any array content [{type:"text",text:"..."}] → plain string
     const rawMessages = body.messages || [
       { role: "user", content: body.prompt || "Hello" }
     ];
 
     const messages = rawMessages.map(msg => {
-      let content = msg.content;
-      // If content is an array (e.g. [{type:"text", text:"hello"}, ...]), flatten to string
-      if (Array.isArray(content)) {
-        content = content
-          .map(part => {
-            if (typeof part === "string") return part;
-            if (part?.type === "text") return part.text ?? "";
-            return "";
-          })
-          .join("\n")
-          .trim();
+      let c = msg.content;
+      if (Array.isArray(c)) {
+        c = c.map(part => {
+          if (typeof part === "string") return part;
+          if (part && part.type === "text") return part.text || "";
+          return "";
+        }).join("\n").trim();
       }
-      return { role: msg.role, content: content ?? "" };
+      return { role: msg.role, content: c || "" };
     });
 
-    // ── Call Cloudflare Workers AI ───────────────────────────────────────────
+    // Keep last 20 messages to avoid context overflow (128k window)
+    const trimmedMessages = messages.slice(-20);
+
+    // ── Call Cloudflare Workers AI (gpt-oss-120b) ────────────────────────────
     let content = "";
     try {
       const aiResponse = await env.AI.run(
-        "@cf/qwen/qwen2.5-coder-32b-instruct",
-        { messages, max_tokens: 8192 }   // ✅ no stream:false
+        MODEL_ID,
+        {
+          messages: trimmedMessages,
+          max_tokens: 8192,
+          reasoning: { effort: "medium" }  // low | medium | high
+        }
       );
 
-      // Safely extract content from whatever shape the response has
+      // gpt-oss-120b returns Responses API format:
+      // { output: [{ type:"message", content:[{ type:"output_text", text:"..." }] }] }
+      // But also supports standard: { response: "..." }
+      // Handle all possible shapes:
       content =
-        aiResponse?.response ??
-        aiResponse?.result?.response ??
-        aiResponse?.choices?.[0]?.message?.content ??
+        // Responses API format
+        (aiResponse?.output?.[0]?.content?.[0]?.text) ||
+        (aiResponse?.output?.[0]?.content) ||
+        // Standard chat format
+        (aiResponse?.response) ||
+        (aiResponse?.result?.response) ||
+        (aiResponse?.choices?.[0]?.message?.content) ||
         "";
 
-      if (!content) {
-        console.error("Empty AI response. Full object:", JSON.stringify(aiResponse));
+      // If output is an array of content blocks, join them
+      if (Array.isArray(aiResponse?.output)) {
+        const texts = [];
+        for (const block of aiResponse.output) {
+          if (block.type === "message" && Array.isArray(block.content)) {
+            for (const part of block.content) {
+              if (part.type === "output_text" && part.text) texts.push(part.text);
+              if (part.type === "text" && part.text) texts.push(part.text);
+            }
+          }
+          if (typeof block.content === "string") texts.push(block.content);
+        }
+        if (texts.length > 0) content = texts.join("\n");
       }
 
     } catch (err) {
-      console.error("AI run error:", err.message);
       return new Response(JSON.stringify({
         error: { message: err.message, type: "ai_error" }
       }), { status: 500, headers: corsHeaders });
@@ -112,12 +135,9 @@ export default {
     // ── Ollama: /api/chat ────────────────────────────────────────────────────
     if (url.pathname === "/api/chat") {
       return new Response(JSON.stringify({
-        model: "qwen2.5-coder-32b",
+        model: MODEL_NAME,
         created_at: new Date().toISOString(),
-        message: {
-          role: "assistant",
-          content: content
-        },
+        message: { role: "assistant", content: content },
         done_reason: "stop",
         done: true,
         total_duration: 1000000000,
@@ -132,7 +152,7 @@ export default {
     // ── Ollama: /api/generate ────────────────────────────────────────────────
     if (url.pathname === "/api/generate") {
       return new Response(JSON.stringify({
-        model: "qwen2.5-coder-32b",
+        model: MODEL_NAME,
         created_at: new Date().toISOString(),
         response: content,
         done: true,
@@ -140,7 +160,7 @@ export default {
       }), { headers: corsHeaders });
     }
 
-    // ── OpenAI: /v1/chat/completions  (Chatbox AI uses this) ─────────────────
+    // ── OpenAI: /v1/chat/completions (Chatbox AI & all apps use this) ─────────
     if (
       url.pathname === "/v1/chat/completions" ||
       url.pathname === "/chat/completions"
@@ -149,7 +169,7 @@ export default {
         id: "chatcmpl-" + Date.now(),
         object: "chat.completion",
         created: Math.floor(Date.now() / 1000),
-        model: "qwen2.5-coder-32b",
+        model: MODEL_NAME,
         choices: [{
           index: 0,
           message: { role: "assistant", content: content },
@@ -159,12 +179,12 @@ export default {
       }), { headers: corsHeaders });
     }
 
-    // ── Fallback: root "/" or anything else → OpenAI format ──────────────────
+    // ── Fallback: root "/" or anything else ──────────────────────────────────
     return new Response(JSON.stringify({
       id: "chatcmpl-" + Date.now(),
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: "qwen2.5-coder-32b",
+      model: MODEL_NAME,
       choices: [{
         index: 0,
         message: { role: "assistant", content: content },
