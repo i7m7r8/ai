@@ -61,9 +61,27 @@ export default {
       body = {};
     }
 
-    const messages = body.messages || [
+    // Normalize messages — Cloudflare AI requires content as a plain string.
+    // Chatbox AI sends content as an array of {type, text} objects (OpenAI vision format).
+    const rawMessages = body.messages || [
       { role: "user", content: body.prompt || "Hello" }
     ];
+
+    const messages = rawMessages.map(msg => {
+      let content = msg.content;
+      // If content is an array (e.g. [{type:"text", text:"hello"}, ...]), flatten to string
+      if (Array.isArray(content)) {
+        content = content
+          .map(part => {
+            if (typeof part === "string") return part;
+            if (part?.type === "text") return part.text ?? "";
+            return "";
+          })
+          .join("\n")
+          .trim();
+      }
+      return { role: msg.role, content: content ?? "" };
+    });
 
     // ── Call Cloudflare Workers AI ───────────────────────────────────────────
     let content = "";
