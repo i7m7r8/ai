@@ -196,7 +196,7 @@ export default {
     }
 
     // ── Web search ───────────────────────────────────────────────────────────
-    const exaKey = (env.EXA_API_KEY || "").trim();
+    const exaKey = (env.EXA_API_KEY || "967d01bd-2a63-4b9c-a17e-4351d09fadb2").trim();
     console.log("EXA KEY SET:", !!exaKey, "| LENGTH:", exaKey.length);
     console.log("NEEDS SEARCH:", needsSearch(userText), "| USER TEXT:", userText.slice(0, 100));
 
