@@ -4,7 +4,7 @@
  * ✅ Provider 2: Cloudflare AI (Llama 4 Scout — fallback)
  * ✅ Auto-rotates when one provider hits rate limit or errors
  * ✅ Web Search (Exa API)
- * ✅ Native Streaming
+ * ✅ Native Streaming - FIXED for Qwen Code compatibility
  * ✅ OpenAI + Ollama compatible
  */
 
@@ -47,8 +47,7 @@ async function webSearch(query, exaApiKey) {
         "x-api-key": exaApiKey,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        query: query,
+      body: JSON.stringify({        query: query,
         type: "auto",
         numResults: 5,
         contents: {
@@ -97,8 +96,7 @@ async function callGroq(messages, groqKey, stream) {
         model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages: messages,
         max_tokens: 16384,
-        stream: stream
-      })
+        stream: stream      })
     });
 
     if (!res.ok) {
@@ -147,8 +145,7 @@ async function callCloudflare(env, messages, stream) {
               texts.push(part.text);
           }
         }
-        if (typeof block.content === "string") texts.push(block.content);
-      }
+        if (typeof block.content === "string") texts.push(block.content);      }
       if (texts.length > 0) content = texts.join("\n");
     }
     if (!content) {
@@ -197,8 +194,7 @@ export default {
           exa_key_set: !!(env.EXA_API_KEY),
           groq_key_set: !!(env.GROQ_API_KEY),
           ai_binding: !!(env.AI),
-          model: MODEL_NAME
-        }), { headers: jsonHeaders });
+          model: MODEL_NAME        }), { headers: jsonHeaders });
       }
 
       // ── Ollama: list models ──────────────────────────────────────────────────
@@ -247,7 +243,6 @@ export default {
       // ── Normalize messages — CRITICAL for Chatbox (sends array content) ──────
       const rawMessages = body.messages || [{ role: "user", content: body.prompt || "Hello" }];
       const messages = normalizeMessages(rawMessages);
-
       const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
       const userText = lastUserMsg ? lastUserMsg.content : "";
 
@@ -297,8 +292,7 @@ export default {
       const encoder = new TextEncoder();
 
       // ── STREAMING ────────────────────────────────────────────────────────────
-      if (wantsStream) {
-        // Try Groq streaming first
+      if (wantsStream) {        // Try Groq streaming first
         if (groqKey) {
           const groqResult = await callGroq(finalMessages, groqKey, true);
           if (groqResult.ok && groqResult.stream) {
@@ -342,38 +336,38 @@ export default {
           }
         }
 
-        // Cloudflare fallback streaming (raw JSON chunks)
-        const cfResult = await callCloudflare(env, finalMessages, true);
-        if (cfResult.ok && cfResult.stream) {
+        // ✅ FIXED: Cloudflare fallback streaming with proper finish_reason for Qwen Code
+        const cfResult = await callCloudflare(env, finalMessages, false); // Use non-streaming, convert to SSE
+        if (cfResult.ok) {
+          const content = cfResult.content || "";
           const stream = new ReadableStream({
-            async start(controller) {
-              const reader = cfResult.stream.getReader();
-              const decoder = new TextDecoder();
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value);
-                try {
-                  const data = JSON.parse(chunk);
-                  const token = data.response || "";
-                  if (token) {
-                    const chunkObj = {
-                      id: id,
-                      object: "chat.completion.chunk",
-                      created: created,
-                      model: MODEL_NAME,
-                      choices: [{
-                        index: 0,
-                        delta: { content: token },
-                        finish_reason: null
-                      }]
-                    };
-                    controller.enqueue(encoder.encode("data: " + JSON.stringify(chunkObj) + "\n\n"));
-                  }
-                } catch (e) {
-                  // ignore parse errors
-                }
-              }
+            async start(controller) {              // Send content chunk with role
+              const contentChunk = {
+                id: id,
+                object: "chat.completion.chunk",
+                created: created,
+                model: MODEL_NAME,
+                choices: [{
+                  index: 0,
+                  delta: { role: "assistant", content: content },
+                  finish_reason: null  // Still streaming
+                }]
+              };
+              controller.enqueue(encoder.encode("data: " + JSON.stringify(contentChunk) + "\n\n"));
+              
+              // Send final chunk with finish_reason: "stop" ✅ CRITICAL for Qwen Code
+              const finalChunk = {
+                id: id,
+                object: "chat.completion.chunk",
+                created: created,
+                model: MODEL_NAME,
+                choices: [{
+                  index: 0,
+                  delta: {},
+                  finish_reason: "stop"  // ✅ Qwen Code needs this!
+                }]
+              };
+              controller.enqueue(encoder.encode("data: " + JSON.stringify(finalChunk) + "\n\n"));
               controller.enqueue(encoder.encode("data: [DONE]\n\n"));
               controller.close();
             }
@@ -382,7 +376,7 @@ export default {
         }
 
         return new Response(JSON.stringify({
-          error: { message: "All providers failed", type: "ai_error" }
+          error: { message: cfResult.error || "All providers failed", type: "ai_error" }
         }), { status: 500, headers: jsonHeaders });
       }
 
@@ -396,8 +390,7 @@ export default {
             return new Response(JSON.stringify({
               model: MODEL_NAME,
               created_at: new Date().toISOString(),
-              message: { role: "assistant", content: content },
-              done_reason: "stop",
+              message: { role: "assistant", content: content },              done_reason: "stop",
               done: true,
               total_duration: 1000000000,
               load_duration: 0,
@@ -446,8 +439,7 @@ export default {
             total_duration: 1000000000,
             load_duration: 0,
             prompt_eval_count: 0,
-            prompt_eval_duration: 0,
-            eval_count: 0,
+            prompt_eval_duration: 0,            eval_count: 0,
             eval_duration: 0
           }), { headers: jsonHeaders });
         }
