@@ -1,7 +1,16 @@
 name = "ai-coding-worker"
 main = "src/index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-01-01"
 
+# AI Binding for Workers AI [[32]], [[33]]
 [ai]
 binding = "AI"
 
+# Environment Variables
+[vars]
+EXA_API_KEY = ""  # Optional: Add your Exa API key for web search
+
+# Development settings
+[dev]
+port = 8787
+local_protocol = "http"
