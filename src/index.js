@@ -1,31 +1,16 @@
 /**
  * Cloudflare Worker — Multi-Provider AI with Auto Fallback
- * ✅ Provider 1: Groq (Llama 4 Scout — 10M context, fastest)
- * ✅ Provider 2: Cloudflare AI (Llama 4 Scout — fallback)
- * ✅ Auto-rotates when one provider hits rate limit or errors
- * ✅ Web Search (Exa API)
- * ✅ Native Streaming - FIXED for Qwen Code compatibility
- * ✅ OpenAI + Ollama compatible
+ * FIXED: Proper OpenAI SSE streaming format for Qwen Code
  */
 
 function needsSearch(text) {
   const t = text.toLowerCase();
   return (
-    t.includes("latest") ||
-    t.includes("current") ||
-    t.includes("today") ||
-    t.includes("news") ||
-    t.includes("price") ||
-    t.includes("weather") ||
-    t.includes("2025") ||
-    t.includes("2026") ||
-    t.includes("who is") ||
-    t.includes("search") ||
-    t.includes("find") ||
-    t.includes("recent") ||
-    t.includes("right now") ||
-    t.includes("stock") ||
-    t.includes("score")
+    t.includes("latest") || t.includes("current") || t.includes("today") ||
+    t.includes("news") || t.includes("price") || t.includes("weather") ||
+    t.includes("2025") || t.includes("2026") || t.includes("who is") ||
+    t.includes("search") || t.includes("find") || t.includes("recent") ||
+    t.includes("right now") || t.includes("stock") || t.includes("score")
   );
 }
 
@@ -47,13 +32,11 @@ async function webSearch(query, exaApiKey) {
         "x-api-key": exaApiKey,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({        query: query,
+      body: JSON.stringify({
+        query: query,
         type: "auto",
         numResults: 5,
-        contents: {
-          text: true,
-          highlights: { numSentences: 3 }
-        }
+        contents: { text: true, highlights: { numSentences: 3 } }
       })
     });
     if (!res.ok) return null;
@@ -64,11 +47,9 @@ async function webSearch(query, exaApiKey) {
         (r.highlights ? r.highlights.join(" ") : (r.text || "").slice(0, 300));
     }).join("\n\n");
   } catch (e) {
-    return null;
-  }
+    return null;  }
 }
 
-// Flatten array content [{type:"text",text:"..."}] → plain string
 function normalizeMessages(rawMessages) {
   return rawMessages.map(function(msg) {
     let c = msg.content;
@@ -83,7 +64,6 @@ function normalizeMessages(rawMessages) {
   });
 }
 
-// Call Groq — returns { ok, content, stream }
 async function callGroq(messages, groqKey, stream) {
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -96,46 +76,27 @@ async function callGroq(messages, groqKey, stream) {
         model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages: messages,
         max_tokens: 16384,
-        stream: stream      })
+        stream: stream
+      })
     });
-
-    if (!res.ok) {
-      return { ok: false, error: "Groq HTTP " + res.status };
-    }
-
-    if (stream) {
-      return { ok: true, stream: res.body };
-    }
-
+    if (!res.ok) return { ok: false, error: "Groq HTTP " + res.status };
+    if (stream) return { ok: true, stream: res.body };
     const data = await res.json();
     const content = (data.choices && data.choices[0] && data.choices[0].message)
-      ? data.choices[0].message.content || ""
-      : "";
+      ? data.choices[0].message.content || "" : "";
     return { ok: true, content: content };
   } catch (err) {
     return { ok: false, error: err.message };
   }
 }
 
-// Call Cloudflare AI — returns { ok, content, stream }
 async function callCloudflare(env, messages, stream) {
   try {
     const aiResponse = await env.AI.run(
       "@cf/meta/llama-4-scout-17b-16e-instruct",
-      {
-        messages: messages,
-        max_tokens: 16384,
-        stream: stream
-      }
+      { messages: messages, max_tokens: 16384, stream: stream }
     );
-
-    if (stream) {
-      // Cloudflare AI streams raw JSON chunks, not SSE
-      return { ok: true, stream: aiResponse };
-    }
-
-    // Extract content from all possible shapes
-    let content = "";
+    if (stream) return { ok: true, stream: aiResponse };    let content = "";
     if (Array.isArray(aiResponse && aiResponse.output)) {
       const texts = [];
       for (const block of aiResponse.output) {
@@ -145,15 +106,15 @@ async function callCloudflare(env, messages, stream) {
               texts.push(part.text);
           }
         }
-        if (typeof block.content === "string") texts.push(block.content);      }
+        if (typeof block.content === "string") texts.push(block.content);
+      }
       if (texts.length > 0) content = texts.join("\n");
     }
     if (!content) {
       content = (aiResponse && aiResponse.response) ||
                 (aiResponse && aiResponse.result && aiResponse.result.response) ||
                 (aiResponse && aiResponse.choices && aiResponse.choices[0] &&
-                 aiResponse.choices[0].message && aiResponse.choices[0].message.content) ||
-                "";
+                 aiResponse.choices[0].message && aiResponse.choices[0].message.content) || "";
     }
     return { ok: true, content: content };
   } catch (e) {
@@ -178,26 +139,27 @@ export default {
         "Connection": "keep-alive"
       };
 
+      // Handle CORS preflight
       if (request.method === "OPTIONS") {
         return new Response(null, {
           headers: {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization"
-          }
+            "Access-Control-Allow-Headers": "Content-Type, Authorization"          }
         });
       }
 
-      // ── Debug ────────────────────────────────────────────────────────────────
+      // Debug endpoint
       if (url.pathname === "/debug") {
         return new Response(JSON.stringify({
           exa_key_set: !!(env.EXA_API_KEY),
           groq_key_set: !!(env.GROQ_API_KEY),
           ai_binding: !!(env.AI),
-          model: MODEL_NAME        }), { headers: jsonHeaders });
+          model: MODEL_NAME
+        }), { headers: jsonHeaders });
       }
 
-      // ── Ollama: list models ──────────────────────────────────────────────────
+      // Ollama: list models
       if (url.pathname === "/api/tags") {
         return new Response(JSON.stringify({
           models: [{
@@ -216,7 +178,7 @@ export default {
         }), { headers: jsonHeaders });
       }
 
-      // ── OpenAI: list models ──────────────────────────────────────────────────
+      // OpenAI: list models
       if (url.pathname === "/v1/models" || url.pathname === "/models") {
         return new Response(JSON.stringify({
           object: "list",
@@ -229,24 +191,24 @@ export default {
         }), { headers: jsonHeaders });
       }
 
-      // ── Parse body ───────────────────────────────────────────────────────────
+      // Parse body
       let body = {};
       try {
-        const text = await request.text();
-        if (text && text.trim().length > 0) body = JSON.parse(text);
+        const text = await request.text();        if (text && text.trim().length > 0) body = JSON.parse(text);
       } catch (e) {
         body = {};
       }
 
       const wantsStream = body.stream === true;
 
-      // ── Normalize messages — CRITICAL for Chatbox (sends array content) ──────
+      // Normalize messages
       const rawMessages = body.messages || [{ role: "user", content: body.prompt || "Hello" }];
       const messages = normalizeMessages(rawMessages);
+
       const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
       const userText = lastUserMsg ? lastUserMsg.content : "";
 
-      // ── Tool context ─────────────────────────────────────────────────────────
+      // Tool context
       let toolContext = "Current UTC time: " + new Date().toUTCString() + "\n";
       const calcMatch = userText.match(/([\d\s+\-*/.()%]{3,})/);
       if (calcMatch && /[+\-*/]/.test(calcMatch[1])) {
@@ -254,26 +216,21 @@ export default {
         if (result) toolContext += result + "\n";
       }
 
-      // ── Web search ───────────────────────────────────────────────────────────
+      // Web search
       const exaKey = env.EXA_API_KEY ? env.EXA_API_KEY.trim() : null;
       if (needsSearch(userText) && exaKey) {
         try {
-          const q = userText.replace(/can you|please|search for|find|tell me about/gi, "")
-                            .trim()
-                            .slice(0, 200);
+          const q = userText.replace(/can you|please|search for|find|tell me about/gi, "").trim().slice(0, 200);
           const results = await webSearch(q, exaKey);
           if (results) toolContext += "\n\nWeb search results:\n" + results + "\n";
-        } catch (e) {
-          // ignore search errors
-        }
+        } catch (e) { /* ignore */ }
       }
 
-      // ── Build final messages ─────────────────────────────────────────────────
+      // Build final messages
       const systemMsg = {
         role: "system",
         content: "You are a helpful AI assistant. Use this real-time context:\n\n" +
-                 toolContext +
-                 "\nCite sources when using search results. Be accurate and concise."
+                 toolContext + "\nCite sources when using search results. Be accurate and concise."
       };
       const hasSystem = messages[0] && messages[0].role === "system";
       const finalMessages = hasSystem
@@ -286,89 +243,56 @@ export default {
           error: { message: "No API keys configured", type: "config_error" }
         }), { status: 500, headers: jsonHeaders });
       }
-
       const id = "chatcmpl-" + Date.now();
       const created = Math.floor(Date.now() / 1000);
       const encoder = new TextEncoder();
 
-      // ── STREAMING ────────────────────────────────────────────────────────────
-      if (wantsStream) {        // Try Groq streaming first
+      // STREAMING - FIXED for Qwen Code
+      if (wantsStream) {
+        // Try Groq first
         if (groqKey) {
           const groqResult = await callGroq(finalMessages, groqKey, true);
           if (groqResult.ok && groqResult.stream) {
-            // Pipe Groq SSE stream directly
-            const stream = new ReadableStream({
-              async start(controller) {
-                const reader = groqResult.stream.getReader();
-                const decoder = new TextDecoder();
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  const text = decoder.decode(value);
-                  const lines = text.split("\n").filter(l => l.trim());
-                  for (const line of lines) {
-                    if (line.startsWith("data: ")) {
-                      const data = line.slice(6).trim();
-                      if (data === "[DONE]") {
-                        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                        break;
-                      }
-                      try {
-                        const parsed = JSON.parse(data);
-                        parsed.model = MODEL_NAME;
-                        if (parsed.choices) {
-                          parsed.choices.forEach(c => {
-                            if (c.delta && c.delta.content !== undefined)
-                              c.delta.content = String(c.delta.content);
-                          });
-                        }
-                        controller.enqueue(encoder.encode("data: " + JSON.stringify(parsed) + "\n\n"));
-                      } catch (e) {
-                        // ignore malformed JSON
-                      }
-                    }
-                  }
-                }
-                controller.close();
-              }
-            });
-            return new Response(stream, { headers: sseHeaders });
+            return new Response(groqResult.stream, { headers: sseHeaders });
           }
         }
 
-        // ✅ FIXED: Cloudflare fallback streaming with proper finish_reason for Qwen Code
-        const cfResult = await callCloudflare(env, finalMessages, false); // Use non-streaming, convert to SSE
+        // Cloudflare fallback - FIXED with proper finish_reason
+        const cfResult = await callCloudflare(env, finalMessages, false);
         if (cfResult.ok) {
           const content = cfResult.content || "";
           const stream = new ReadableStream({
-            async start(controller) {              // Send content chunk with role
-              const contentChunk = {
-                id: id,
-                object: "chat.completion.chunk",
-                created: created,
-                model: MODEL_NAME,
-                choices: [{
-                  index: 0,
-                  delta: { role: "assistant", content: content },
-                  finish_reason: null  // Still streaming
-                }]
-              };
-              controller.enqueue(encoder.encode("data: " + JSON.stringify(contentChunk) + "\n\n"));
+            async start(controller) {
+              // Content chunk with role
+              controller.enqueue(encoder.encode(
+                "data: " + JSON.stringify({
+                  id: id,
+                  object: "chat.completion.chunk",
+                  created: created,
+                  model: MODEL_NAME,
+                  choices: [{
+                    index: 0,
+                    delta: { role: "assistant", content: content },
+                    finish_reason: null
+                  }]
+                }) + "\n\n"
+              ));
               
-              // Send final chunk with finish_reason: "stop" ✅ CRITICAL for Qwen Code
-              const finalChunk = {
-                id: id,
-                object: "chat.completion.chunk",
-                created: created,
-                model: MODEL_NAME,
-                choices: [{
-                  index: 0,
-                  delta: {},
-                  finish_reason: "stop"  // ✅ Qwen Code needs this!
-                }]
-              };
-              controller.enqueue(encoder.encode("data: " + JSON.stringify(finalChunk) + "\n\n"));
-              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              // Final chunk with finish_reason: "stop" (CRITICAL for Qwen Code)
+              controller.enqueue(encoder.encode(
+                "data: " + JSON.stringify({
+                  id: id,
+                  object: "chat.completion.chunk",
+                  created: created,
+                  model: MODEL_NAME,
+                  choices: [{
+                    index: 0,
+                    delta: {},
+                    finish_reason: "stop"
+                  }]
+                }) + "\n\n"
+              ));
+                            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
               controller.close();
             }
           });
@@ -380,36 +304,11 @@ export default {
         }), { status: 500, headers: jsonHeaders });
       }
 
-      // ── NON-STREAMING ────────────────────────────────────────────────────────
-      // Try Groq first
+      // NON-STREAMING
       if (groqKey) {
         const groqResult = await callGroq(finalMessages, groqKey, false);
         if (groqResult.ok && groqResult.content !== undefined) {
           const content = groqResult.content;
-          if (url.pathname === "/api/chat") {
-            return new Response(JSON.stringify({
-              model: MODEL_NAME,
-              created_at: new Date().toISOString(),
-              message: { role: "assistant", content: content },              done_reason: "stop",
-              done: true,
-              total_duration: 1000000000,
-              load_duration: 0,
-              prompt_eval_count: 0,
-              prompt_eval_duration: 0,
-              eval_count: 0,
-              eval_duration: 0
-            }), { headers: jsonHeaders });
-          }
-          if (url.pathname === "/api/generate") {
-            return new Response(JSON.stringify({
-              model: MODEL_NAME,
-              created_at: new Date().toISOString(),
-              response: content,
-              done: true,
-              done_reason: "stop"
-            }), { headers: jsonHeaders });
-          }
-          // OpenAI compatible
           return new Response(JSON.stringify({
             id: id,
             object: "chat.completion",
@@ -429,29 +328,6 @@ export default {
       const cfResult = await callCloudflare(env, finalMessages, false);
       if (cfResult.ok) {
         const content = cfResult.content || "";
-        if (url.pathname === "/api/chat") {
-          return new Response(JSON.stringify({
-            model: MODEL_NAME,
-            created_at: new Date().toISOString(),
-            message: { role: "assistant", content: content },
-            done_reason: "stop",
-            done: true,
-            total_duration: 1000000000,
-            load_duration: 0,
-            prompt_eval_count: 0,
-            prompt_eval_duration: 0,            eval_count: 0,
-            eval_duration: 0
-          }), { headers: jsonHeaders });
-        }
-        if (url.pathname === "/api/generate") {
-          return new Response(JSON.stringify({
-            model: MODEL_NAME,
-            created_at: new Date().toISOString(),
-            response: content,
-            done: true,
-            done_reason: "stop"
-          }), { headers: jsonHeaders });
-        }
         return new Response(JSON.stringify({
           id: id,
           object: "chat.completion",
@@ -465,13 +341,11 @@ export default {
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
         }), { headers: jsonHeaders });
       }
-
       return new Response(JSON.stringify({
         error: { message: cfResult.error || "All providers failed", type: "ai_error" }
       }), { status: 500, headers: jsonHeaders });
 
     } catch (err) {
-      // Global error handler – prevents CF error page with Ray ID
       return new Response(JSON.stringify({
         error: { message: err.message, type: "internal_error" }
       }), {
