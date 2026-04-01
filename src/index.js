@@ -1,16 +1,31 @@
 /**
- * Cloudflare Worker — Multi-Provider AI with Auto Fallback
- * FIXED: Proper OpenAI SSE streaming format for Qwen Code
+ * Cloudflare Pages/Worker — Qwen AI API with Auto Fallback
+ * ✅ Primary: Qwen3-30B-A3B-FP8 (Most powerful Qwen on CF AI) [[20]]
+ * ✅ Fallback: Qwen2.5-Coder-32B-Instruct (Best for coding) [[22]]
+ * ✅ Auto-rotates when one model hits rate limit or errors
+ * ✅ Web Search (Exa API)
+ * ✅ OpenAI + Ollama Compatible Streaming
+ * ✅ Proper SSE format for Qwen Code CLI
  */
 
 function needsSearch(text) {
   const t = text.toLowerCase();
   return (
-    t.includes("latest") || t.includes("current") || t.includes("today") ||
-    t.includes("news") || t.includes("price") || t.includes("weather") ||
-    t.includes("2025") || t.includes("2026") || t.includes("who is") ||
-    t.includes("search") || t.includes("find") || t.includes("recent") ||
-    t.includes("right now") || t.includes("stock") || t.includes("score")
+    t.includes("latest") ||
+    t.includes("current") ||
+    t.includes("today") ||
+    t.includes("news") ||
+    t.includes("price") ||
+    t.includes("weather") ||
+    t.includes("2025") ||
+    t.includes("2026") ||
+    t.includes("who is") ||
+    t.includes("search") ||
+    t.includes("find") ||
+    t.includes("recent") ||
+    t.includes("right now") ||
+    t.includes("stock") ||
+    t.includes("score")
   );
 }
 
@@ -32,11 +47,13 @@ async function webSearch(query, exaApiKey) {
         "x-api-key": exaApiKey,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        query: query,
+      body: JSON.stringify({        query: query,
         type: "auto",
         numResults: 5,
-        contents: { text: true, highlights: { numSentences: 3 } }
+        contents: {
+          text: true,
+          highlights: { numSentences: 3 }
+        }
       })
     });
     if (!res.ok) return null;
@@ -47,9 +64,11 @@ async function webSearch(query, exaApiKey) {
         (r.highlights ? r.highlights.join(" ") : (r.text || "").slice(0, 300));
     }).join("\n\n");
   } catch (e) {
-    return null;  }
+    return null;
+  }
 }
 
+// Flatten array content [{type:"text",text:"..."}] → plain string
 function normalizeMessages(rawMessages) {
   return rawMessages.map(function(msg) {
     let c = msg.content;
@@ -64,40 +83,29 @@ function normalizeMessages(rawMessages) {
   });
 }
 
-async function callGroq(messages, groqKey, stream) {
-  try {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": "Bearer " + groqKey,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "meta-llama/llama-4-scout-17b-16e-instruct",
-        messages: messages,
-        max_tokens: 16384,
-        stream: stream
-      })
-    });
-    if (!res.ok) return { ok: false, error: "Groq HTTP " + res.status };
-    if (stream) return { ok: true, stream: res.body };
-    const data = await res.json();
-    const content = (data.choices && data.choices[0] && data.choices[0].message)
-      ? data.choices[0].message.content || "" : "";
-    return { ok: true, content: content };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-async function callCloudflare(env, messages, stream) {
+// Call Qwen3-30B via Cloudflare AI Binding — returns { ok, content, stream }
+async function callQwen3(env, messages, stream) {
   try {
     const aiResponse = await env.AI.run(
-      "@cf/meta/llama-4-scout-17b-16e-instruct",
-      { messages: messages, max_tokens: 16384, stream: stream }
+      "@cf/qwen/qwen3-30b-a3b-fp8",  // Most powerful Qwen on CF AI [[20]]
+      {
+        messages: messages,
+        max_tokens: 16384,
+        stream: stream,
+        temperature: 0.7
+      }
     );
-    if (stream) return { ok: true, stream: aiResponse };    let content = "";
-    if (Array.isArray(aiResponse && aiResponse.output)) {
+
+    if (stream) {      return { ok: true, stream: aiResponse };
+    }
+
+    // Extract content from all possible shapes
+    let content = "";
+    if (aiResponse && aiResponse.response) {
+      content = aiResponse.response;
+    } else if (aiResponse && aiResponse.result && aiResponse.result.response) {
+      content = aiResponse.result.response;
+    } else if (Array.isArray(aiResponse && aiResponse.output)) {
       const texts = [];
       for (const block of aiResponse.output) {
         if (block.type === "message" && Array.isArray(block.content)) {
@@ -110,12 +118,48 @@ async function callCloudflare(env, messages, stream) {
       }
       if (texts.length > 0) content = texts.join("\n");
     }
-    if (!content) {
-      content = (aiResponse && aiResponse.response) ||
-                (aiResponse && aiResponse.result && aiResponse.result.response) ||
-                (aiResponse && aiResponse.choices && aiResponse.choices[0] &&
-                 aiResponse.choices[0].message && aiResponse.choices[0].message.content) || "";
+    
+    return { ok: true, content: content };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// Call Qwen2.5-Coder-32B via Cloudflare AI Binding — returns { ok, content, stream }
+async function callQwenCoder(env, messages, stream) {
+  try {
+    const aiResponse = await env.AI.run(
+      "@cf/qwen/qwen2.5-coder-32b-instruct",  // Best for coding [[22]]
+      {
+        messages: messages,
+        max_tokens: 16384,
+        stream: stream,
+        temperature: 0.7
+      }
+    );
+
+    if (stream) {
+      return { ok: true, stream: aiResponse };
     }
+
+    let content = "";
+    if (aiResponse && aiResponse.response) {
+      content = aiResponse.response;
+    } else if (aiResponse && aiResponse.result && aiResponse.result.response) {      content = aiResponse.result.response;
+    } else if (Array.isArray(aiResponse && aiResponse.output)) {
+      const texts = [];
+      for (const block of aiResponse.output) {
+        if (block.type === "message" && Array.isArray(block.content)) {
+          for (const part of block.content) {
+            if ((part.type === "output_text" || part.type === "text") && part.text)
+              texts.push(part.text);
+          }
+        }
+        if (typeof block.content === "string") texts.push(block.content);
+      }
+      if (texts.length > 0) content = texts.join("\n");
+    }
+    
     return { ok: true, content: content };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -126,7 +170,7 @@ export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
-      const MODEL_NAME = "llama-4-scout";
+      const MODEL_NAME = "qwen3-30b-a3b-fp8";
 
       const jsonHeaders = {
         "Content-Type": "application/json",
@@ -145,17 +189,17 @@ export default {
           headers: {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization"          }
+            "Access-Control-Allow-Headers": "Content-Type, Authorization"
+          }
         });
       }
 
-      // Debug endpoint
-      if (url.pathname === "/debug") {
+      // Debug endpoint      if (url.pathname === "/debug") {
         return new Response(JSON.stringify({
           exa_key_set: !!(env.EXA_API_KEY),
-          groq_key_set: !!(env.GROQ_API_KEY),
           ai_binding: !!(env.AI),
-          model: MODEL_NAME
+          primary_model: "@cf/qwen/qwen3-30b-a3b-fp8",
+          fallback_model: "@cf/qwen/qwen2.5-coder-32b-instruct"
         }), { headers: jsonHeaders });
       }
 
@@ -165,13 +209,13 @@ export default {
           models: [{
             name: MODEL_NAME,
             model: MODEL_NAME,
-            modified_at: "2025-04-05T00:00:00Z",
-            size: 17000000000,
-            digest: "llama4scout",
+            modified_at: "2026-01-01T00:00:00Z",
+            size: 30000000000,
+            digest: "qwen3-30b",
             details: {
               format: "gguf",
-              family: "meta",
-              parameter_size: "17Bx16E",
+              family: "qwen",
+              parameter_size: "30B-A3B",
               quantization_level: "FP8"
             }
           }]
@@ -185,8 +229,8 @@ export default {
           data: [{
             id: MODEL_NAME,
             object: "model",
-            created: 1743811200,
-            owned_by: "meta"
+            created: 1735689600,
+            owned_by: "qwen"
           }]
         }), { headers: jsonHeaders });
       }
@@ -194,11 +238,11 @@ export default {
       // Parse body
       let body = {};
       try {
-        const text = await request.text();        if (text && text.trim().length > 0) body = JSON.parse(text);
+        const text = await request.text();
+        if (text && text.trim().length > 0) body = JSON.parse(text);
       } catch (e) {
         body = {};
       }
-
       const wantsStream = body.stream === true;
 
       // Normalize messages
@@ -223,47 +267,43 @@ export default {
           const q = userText.replace(/can you|please|search for|find|tell me about/gi, "").trim().slice(0, 200);
           const results = await webSearch(q, exaKey);
           if (results) toolContext += "\n\nWeb search results:\n" + results + "\n";
-        } catch (e) { /* ignore */ }
+        } catch (e) {
+          // ignore search errors
+        }
       }
 
       // Build final messages
       const systemMsg = {
         role: "system",
         content: "You are a helpful AI assistant. Use this real-time context:\n\n" +
-                 toolContext + "\nCite sources when using search results. Be accurate and concise."
+                 toolContext +
+                 "\nCite sources when using search results. Be accurate and concise."
       };
       const hasSystem = messages[0] && messages[0].role === "system";
       const finalMessages = hasSystem
         ? [systemMsg].concat(messages.slice(1))
         : [systemMsg].concat(messages);
 
-      const groqKey = env.GROQ_API_KEY ? env.GROQ_API_KEY.trim() : null;
-      if (!groqKey && !env.AI) {
+      // Check AI binding exists
+      if (!env.AI) {
         return new Response(JSON.stringify({
-          error: { message: "No API keys configured", type: "config_error" }
+          error: { message: "AI binding not configured. Add [ai] section to wrangler.toml", type: "config_error" }
         }), { status: 500, headers: jsonHeaders });
       }
+
       const id = "chatcmpl-" + Date.now();
-      const created = Math.floor(Date.now() / 1000);
-      const encoder = new TextEncoder();
+      const created = Math.floor(Date.now() / 1000);      const encoder = new TextEncoder();
 
-      // STREAMING - FIXED for Qwen Code
+      // STREAMING - Fixed for Qwen Code CLI compatibility
       if (wantsStream) {
-        // Try Groq first
-        if (groqKey) {
-          const groqResult = await callGroq(finalMessages, groqKey, true);
-          if (groqResult.ok && groqResult.stream) {
-            return new Response(groqResult.stream, { headers: sseHeaders });
-          }
-        }
-
-        // Cloudflare fallback - FIXED with proper finish_reason
-        const cfResult = await callCloudflare(env, finalMessages, false);
-        if (cfResult.ok) {
-          const content = cfResult.content || "";
+        // Try Qwen3-30B first (most powerful) [[20]]
+        const qwen3Result = await callQwen3(env, finalMessages, false); // Use non-streaming, convert to SSE
+        
+        if (qwen3Result.ok && qwen3Result.content !== undefined) {
+          const content = qwen3Result.content;
           const stream = new ReadableStream({
             async start(controller) {
-              // Content chunk with role
+              // Send content chunk with role
               controller.enqueue(encoder.encode(
                 "data: " + JSON.stringify({
                   id: id,
@@ -278,7 +318,7 @@ export default {
                 }) + "\n\n"
               ));
               
-              // Final chunk with finish_reason: "stop" (CRITICAL for Qwen Code)
+              // Send final chunk with finish_reason: "stop" (CRITICAL for Qwen Code)
               controller.enqueue(encoder.encode(
                 "data: " + JSON.stringify({
                   id: id,
@@ -288,11 +328,52 @@ export default {
                   choices: [{
                     index: 0,
                     delta: {},
+                    finish_reason: "stop"  // Qwen Code needs this!
+                  }]
+                }) + "\n\n"
+              ));
+              
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              controller.close();
+            }
+          });
+          return new Response(stream, { headers: sseHeaders });
+        }
+
+        // Fallback to Qwen2.5-Coder-32B [[22]]
+        const coderResult = await callQwenCoder(env, finalMessages, false);        if (coderResult.ok) {
+          const content = coderResult.content || "";
+          const stream = new ReadableStream({
+            async start(controller) {
+              controller.enqueue(encoder.encode(
+                "data: " + JSON.stringify({
+                  id: id,
+                  object: "chat.completion.chunk",
+                  created: created,
+                  model: "qwen2.5-coder-32b-instruct",
+                  choices: [{
+                    index: 0,
+                    delta: { role: "assistant", content: content },
+                    finish_reason: null
+                  }]
+                }) + "\n\n"
+              ));
+              
+              controller.enqueue(encoder.encode(
+                "data: " + JSON.stringify({
+                  id: id,
+                  object: "chat.completion.chunk",
+                  created: created,
+                  model: "qwen2.5-coder-32b-instruct",
+                  choices: [{
+                    index: 0,
+                    delta: {},
                     finish_reason: "stop"
                   }]
                 }) + "\n\n"
               ));
-                            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
               controller.close();
             }
           });
@@ -300,34 +381,44 @@ export default {
         }
 
         return new Response(JSON.stringify({
-          error: { message: cfResult.error || "All providers failed", type: "ai_error" }
+          error: { message: coderResult.error || "All models failed", type: "ai_error" }
         }), { status: 500, headers: jsonHeaders });
       }
 
       // NON-STREAMING
-      if (groqKey) {
-        const groqResult = await callGroq(finalMessages, groqKey, false);
-        if (groqResult.ok && groqResult.content !== undefined) {
-          const content = groqResult.content;
+      // Try Qwen3-30B first (most powerful) [[20]]
+      const qwen3Result = await callQwen3(env, finalMessages, false);
+      if (qwen3Result.ok && qwen3Result.content !== undefined) {
+        const content = qwen3Result.content;
+                // Ollama format
+        if (url.pathname === "/api/chat") {
           return new Response(JSON.stringify({
-            id: id,
-            object: "chat.completion",
-            created: created,
             model: MODEL_NAME,
-            choices: [{
-              index: 0,
-              message: { role: "assistant", content: content },
-              finish_reason: "stop"
-            }],
-            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+            created_at: new Date().toISOString(),
+            message: { role: "assistant", content: content },
+            done_reason: "stop",
+            done: true,
+            total_duration: 1000000000,
+            load_duration: 0,
+            prompt_eval_count: 0,
+            prompt_eval_duration: 0,
+            eval_count: 0,
+            eval_duration: 0
           }), { headers: jsonHeaders });
         }
-      }
-
-      // Cloudflare fallback
-      const cfResult = await callCloudflare(env, finalMessages, false);
-      if (cfResult.ok) {
-        const content = cfResult.content || "";
+        
+        // Ollama generate format
+        if (url.pathname === "/api/generate") {
+          return new Response(JSON.stringify({
+            model: MODEL_NAME,
+            created_at: new Date().toISOString(),
+            response: content,
+            done: true,
+            done_reason: "stop"
+          }), { headers: jsonHeaders });
+        }
+        
+        // OpenAI compatible format
         return new Response(JSON.stringify({
           id: id,
           object: "chat.completion",
@@ -341,11 +432,51 @@ export default {
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
         }), { headers: jsonHeaders });
       }
+
+      // Fallback to Qwen2.5-Coder-32B [[22]]
+      const coderResult = await callQwenCoder(env, finalMessages, false);
+      if (coderResult.ok) {
+        const content = coderResult.content || "";
+        
+        if (url.pathname === "/api/chat") {
+          return new Response(JSON.stringify({            model: "qwen2.5-coder-32b-instruct",
+            created_at: new Date().toISOString(),
+            message: { role: "assistant", content: content },
+            done_reason: "stop",
+            done: true
+          }), { headers: jsonHeaders });
+        }
+        
+        if (url.pathname === "/api/generate") {
+          return new Response(JSON.stringify({
+            model: "qwen2.5-coder-32b-instruct",
+            created_at: new Date().toISOString(),
+            response: content,
+            done: true,
+            done_reason: "stop"
+          }), { headers: jsonHeaders });
+        }
+        
+        return new Response(JSON.stringify({
+          id: id,
+          object: "chat.completion",
+          created: created,
+          model: "qwen2.5-coder-32b-instruct",
+          choices: [{
+            index: 0,
+            message: { role: "assistant", content: content },
+            finish_reason: "stop"
+          }],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+        }), { headers: jsonHeaders });
+      }
+
       return new Response(JSON.stringify({
-        error: { message: cfResult.error || "All providers failed", type: "ai_error" }
+        error: { message: coderResult.error || "All models failed", type: "ai_error" }
       }), { status: 500, headers: jsonHeaders });
 
     } catch (err) {
+      // Global error handler
       return new Response(JSON.stringify({
         error: { message: err.message, type: "internal_error" }
       }), {
